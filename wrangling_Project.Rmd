@@ -1,0 +1,409 @@
+---
+title: "Wrangling_Project_Shark_attacks"
+author: "ZhihaoLin"
+date: "2018/4/11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readr)
+library(gapminder)
+library(gutenbergr)
+library(stringr)
+library(ggplot2)
+library(shiny)
+library(tidyverse)
+library(tidytext)
+library(lubridate)
+library(readxl)
+library(maps)
+library(rworldmap)
+library(ggmap)
+library(choroplethr)
+library(plotly)
+library(later)
+```
+
+```{r Load the gap_minder from internet}
+
+urls <- c("https://docs.google.com/spreadsheet/pub?key=phAwcNAVuyj0NpF2PTov2Cw&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=phAwcNAVuyj2tPLxKvvnNPA&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=phAwcNAVuyj0TAlJeCEzcGQ&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=phAwcNAVuyj0XOoBL_n5tAQ&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=0AkBd6lyS3EmpdHo5S0J6ekhVOF9QaVhod05QSGV4T3c&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=pyj6tScZqmEcVezxiMlWaRw&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=pyj6tScZqmEeL79qOoKtofQ&output=xlsx",
+          "https://docs.google.com/spreadsheet/pub?key=pyj6tScZqmEcjeKHnZq6RIg&output=xlsx"
+          )
+
+measures <- c("infant_mortality", "life_expectancy", "fertility","population","gdp", 
+              "maternal_mortality", "health_spending", "gini")
+
+for (i in 1:length(urls)){
+  if (!file.exists(paste0(measures[i], ".xlsx")))
+  download.file(urls[i], destfile = paste0(measures[i], ".xlsx"), method = "auto")
+}
+
+gap_raw <- purrr::map(paste0(measures, ".xlsx"), read_excel, na = c("", "NA", "-", "."))
+names(gap_raw) <- measures
+
+## Convert list to tidy dataset. I haven't figure out how to use map() so I use a for-loop
+gap_new <- NULL
+
+for (i in 1:8) {
+  gap_new[[i]] <- gather(gap_raw[[i]], names(gap_raw[[i]][, 2:dim(gap_raw[[i]])[2]]), key = "year", value = "count")
+}
+
+names(gap_new) <- measures
+
+## Join list of data frames into a single data frame
+for (i in 1:8) {
+  gap_new[[i]]$year <- as.numeric(gap_new[[i]]$year)
+  colnames(gap_new[[i]])[1] <- "country"
+  colnames(gap_new[[i]])[3] <- names(gap_new[i])
+}
+
+gap_tb <- plyr::join_all(gap_new, type = "full")
+co_na <- colnames(gap_tb)
+co_na[1] <- "Country"
+co_na[2] <- "Year"
+colnames(gap_tb) <- co_na
+gap_tb$Country<-str_replace_all(gap_tb$Country,"United States","USA")
+gap_tb$Country <- toupper(gap_tb$Country)
+```
+
+```{r load data, message=FALSE, warning=FALSE}
+attacks <- read_csv("~/attacks.csv")%>%
+  filter(`Case Number`!=0)%>%
+  select(-c(Date,X23,X24))%>%
+  mutate(order=`original order`)%>%
+  filter(Year>=1800)
+attacks$order <-as.character(attacks$order)
+attacks$`Fatal (Y/N)`<-attacks$`Fatal (Y/N)`%>%
+  str_replace("Y","1")%>%
+  str_replace("N","0")%>%
+  str_replace("2017","0")%>%
+  as.numeric()
+Spe <- attacks%>%
+  unnest_tokens(specy,Species)%>%
+  filter(toupper(specy)%in%c("WHITE","BULL","BLACKTIP","ANGEL","GOBLIN","TIGER","BASKING","COPPER","HAMMERHEAD","COOKIECUTTER","NURSE","WHITETIP"))%>%
+  select(order,specy)
+attacks <- left_join(attacks,Spe,by="order")%>%
+  select(-c(order,pdf:href))%>%
+  left_join(gap_tb,by=c("Country","Year"))
+
+```
+
+```{r International tourism information attached, message=FALSE, warning=FALSE}
+tourism <- read_csv("~/API_ST.INT.ARVL_DS2_en_csv_v2.csv",  skip = 4)%>%
+  select(-c(5:39,62,63))%>%
+  na.omit()%>%
+  gather(5:26,key="Year",value="International_Tourism")
+colnames(tourism)[1]<-"Country"
+tourism$Year <- as.numeric(tourism$Year)
+tourism$Country <- str_replace_all(tourism$Country,"United States","USA")
+tourism$Country <- toupper(tourism$Country)
+
+attacks <- attacks%>%
+  left_join(tourism,by=c("Country","Year"))%>%select(-c(29:30))
+act <- attacks%>%
+  unnest_tokens(Act,Activity)%>%
+  select(Act,`original order`)
+top_acts <-act%>%
+  mutate(n=1)%>%
+  group_by(Act)%>%
+  summarise(frequency=sum(n))%>%
+  arrange(desc(frequency))%>%
+  na.omit()%>%
+  .[1:5,]
+act <- act%>%
+  filter(Act%in%c("swimming","fishing","surfing","diving","spearfishing"))
+attacks <- attacks%>%
+  left_join(act,by="original order")
+```
+
+##Since month can describe partially the tempreture, hence here
+```{r}
+time <- read_csv("~/Downloads/attacks.csv")%>%
+  filter(`Case Number`!=0)%>%
+  select(Date,`original order`)%>%
+  na.omit()%>%
+  .[1:6052,]
+time$Date <- time$Date%>%
+  str_replace("Reported "," ")
+pattern <-"[A-z]+"
+time$Date <- time$Date%>%str_extract(pattern)
+time_col_names <- colnames(time)
+time_col_names[1] <- "Month"
+colnames(time) <- time_col_names
+Months <- time%>%
+  mutate(n=1)%>%
+  group_by(Month)%>%
+  summarise(time=sum(n))%>%
+  arrange(desc(time))%>%
+  .[1:12,]
+time <- time%>%
+  filter(Month%in%Months$Month)
+mon <- time$Month
+mon <- mon%>%
+  str_replace_all("Jan","13_1")%>%
+  str_replace_all("Feb","2")%>%
+  str_replace_all("Mar","3")%>%
+  str_replace_all("Apr","4")%>%
+  str_replace_all("May","5")%>%
+  str_replace_all("Jun","6")%>%
+  str_replace_all("Jul","7")%>%
+  str_replace_all("Aug","8")%>%
+  str_replace_all("Sep","9")%>%
+  str_replace_all("Oct","10")%>%
+  str_replace_all("Nov","11")%>%
+  str_replace_all("Dec","12")
+time$Month <- mon
+attacks <- attacks%>%
+  left_join(time,by="original order")
+```
+Area_of_attack <- attacks%>%mutate(n=1)%>%
+  group_by(Area)%>%
+  summarise(attack_of_Area=sum(n))%>%
+  na.omit()%>%
+  arrange(desc(attack_of_Area))%>%
+  .[1:10,]%>%
+  mutate(x=geocode(Area)$lon,y=geocode(Area)$lat)
+##Get the geo information of the area
+```{r Area_Information, message=FALSE, warning=FALSE}
+##This code can work but sometimes it is not working that well. In general I need to run it about ten times to get full informations for the dataset. Hence in order to prevent from failure I would rather use the full to write a csv and use it in the future works.
+##write.csv(Area_of_attack,"Area_information.csv")
+Area_information <- read_csv("~/Downloads/Area_information.csv")
+
+attacks <- attacks%>%left_join(Area_information,by="Area")%>%select(-X1)
+mp <- NULL
+mapWorld <- borders("world", colour="gray50", fill="gray50") 
+mp <- ggplot() +   mapWorld
+mp <- mp+ geom_point(data=Area_information,aes(x,y,color=Area)) 
+mp
+```
+
+```{r}
+countries_fatality <- attacks%>%
+  filter(Year>=1900)%>%
+  select(c(Country,`Fatal (Y/N)`))%>%
+  na.omit()%>%
+  mutate(n=1)%>%
+  group_by(Country)%>%
+  summarise(attacks_in_country=sum(n),death_in_country=sum(`Fatal (Y/N)`))%>%
+  arrange(desc(attacks_in_country))%>%
+  mutate(fatal_rate_country=death_in_country/attacks_in_country)
+area_fatality_in_top100Area <- attacks%>%
+  filter(Year>=1900)%>%
+  select(c(Area,`Fatal (Y/N)`))%>%
+  na.omit()%>%
+  mutate(n=1)%>%
+  group_by(Area)%>%
+  summarise(attacks_in_area=sum(n),death_in_area=sum(`Fatal (Y/N)`))%>%
+  arrange(desc(attacks_in_area))%>%
+  .[1:100,]%>%
+  mutate(fatal_rate_country=death_in_area/attacks_in_area)
+specie_study <- attacks%>%
+  filter(Year>=1800)%>%
+  select(c(specy,`Fatal (Y/N)`))%>%
+  na.omit()%>%
+  mutate(n=1)%>%
+  group_by(specy)%>%
+  summarise(attacks_of_specy=sum(n),death_of_specy=sum(`Fatal (Y/N)`))%>%
+  mutate(fatal_rate_specy=death_of_specy/attacks_of_specy)%>%
+  arrange(desc(fatal_rate_specy))
+countries_fatality%>%
+  .[1:5,]%>%ggplot(aes(Country,fatal_rate_country,color = Country, size = attacks_in_country))+geom_point()+ggtitle("The five Countries attacked most") 
+specie_study%>%
+  .[1:5,]%>%
+  ggplot(aes(specy,fatal_rate_specy,color = specy,size = attacks_of_specy))+geom_point()+ggtitle("The five deadliest sharks")  
+```
+
+
+```{r Plots of diferent activities}
+attacks%>%mutate(n=1)%>%group_by(Act)%>%summarise(Attack=sum(n))%>%na.omit()%>%ggplot(aes(Act,Attack,color=Act,size=Attack))+geom_point()+ggtitle("Top 5 dangerous activities")
+picture_top5 = ggplot(top_acts,aes(x="",y=Act,fill=frequency))+geom_bar(stat = "identity")+coord_polar(theta = "y")
+picture_top5
+```
+##Analysis about if sharks are harmless creatures. Some people claimed that it is our faught to provoke these creatures, however in this analysis it does not seemed this way.
+```{r}
+attacks%>%
+  mutate(n=1)%>%
+  group_by(Type)%>%
+  summarise(Attack=sum(n))%>%
+  na.omit()%>%
+  ggplot(aes(Type,Attack,color=Type,size=Attack))+geom_point()
+```
+##Since most animals on earth can not addapt with all tempreture, it make sense to analysis the frequency of attacks of different months. And there is some relationship about if people are willing to go to the shore-- it is obvious that people can't just sit in their home and wait for being attacked. Seemed the frequency of attack is much higher during the summer than what it is in the winter.
+##I don't know if I should say since people are more willing to go to the shoreline when the tempreture is high, but there is a tendency of high frequency of attacks when it is hot.
+```{r Relationship with tempreture}
+a1 <- attacks%>%
+  filter(Country=="USA")%>%
+  mutate(n=1)%>%
+  filter(Year>=1900)%>%
+  group_by(Month)%>%
+  summarise(attack_of_months=sum(n))%>%
+  na.omit()%>%
+  ggplot(aes(Month,attack_of_months,color = Month))+geom_density()+ggtitle("USA shark attacks by months")
+attacks%>%
+  filter(Country=="AUSTRALIA")%>%
+  mutate(n=1)%>%
+  filter(Year>=1900)%>%
+  group_by(Month)%>%
+  summarise(attack_of_months=sum(n))%>%
+  na.omit()%>%
+  ggplot(aes(Month,attack_of_months,color = Month))+geom_density()+ggtitle("Austrailia shark attacks by months")
+```
+
+```{r}
+top_countries <- attacks%>%
+  group_by(Country,Year)%>%
+  mutate(n=1)%>%
+  summarise(atk=sum(n),death=sum(`Fatal (Y/N)`))%>%
+  na.omit()%>%
+  group_by(Country)%>%
+  summarise(time=sum(atk),kill=sum(death))%>%
+  arrange(desc(time))%>%
+  .[1:5,]
+Age_bar<-c(10:50)
+top_countries%>%
+  left_join(attacks,by="Country")%>%
+  filter(Year>=1900)%>%
+  filter(Year<=2000)%>%
+  group_by(Country,Year)%>%
+  mutate(n=1)%>%
+  summarise(attack=sum(n))%>%
+  ggplot(aes(Year,attack,color=Country))+
+  facet_wrap( ~ Country, nrow = 5)+geom_line()+geom_point()+ggtitle("Attack in top countries")
+attacks%>%
+  filter(Year>=1900)%>%
+  filter(Country=="USA")%>%
+  mutate(n=1)%>%
+  group_by(Age)%>%
+  filter(Age%in%Age_bar)%>%
+  summarise(attack=sum(n))%>%
+  ggplot(aes(Age,attack,color = Age))+geom_density()
+attacks%>%
+  filter(Year>=1900)%>%
+  filter(Country=="AUSTRALIA")%>%
+  mutate(n=1)%>%
+  group_by(Age)%>%
+  filter(Age%in%Age_bar)%>%
+  summarise(attack=sum(n))%>%
+  ggplot(aes(Age,attack,color = Age))+geom_density()
+```
+##It seemed the attacks in the USA is leading, and the standard deviation of attacks in USA is much more than in the Australia. And the mean and median of attacks took place in Austrailia is higher than USA. Maybe the structure of people who go to the shoreline is different in these countries.
+```{r}
+fatality_year<-attacks%>%
+  filter(Year>=1900)%>%
+  group_by(Year)%>%
+  mutate(n=`Fatal (Y/N)`)%>%
+  mutate(t=1)%>%
+  select(c(Year,n,t))%>%
+  na.omit()%>%
+  summarise(death=sum(n),attack=sum(t))%>%
+  filter(2000>=Year,Year>=1900)%>%
+  mutate(Fatal_Rate=death/attack)
+
+ggplot(data=fatality_year,aes(Year,Fatal_Rate))+geom_point()+geom_line()+geom_smooth()+ggtitle("Death Rate since 1900")
+
+attacks%>%
+  filter(Country=="USA")%>%
+  filter(Year>=1900)%>%
+  group_by(Year)%>%
+  mutate(n=`Fatal (Y/N)`)%>%
+  mutate(t=1)%>%
+  select(c(Year,n,t))%>%
+  na.omit()%>%
+  summarise(death=sum(n),attack=sum(t))%>%
+  filter(2000>=Year,Year>=1900)%>%
+  mutate(Fatal_Rate=death/attack)%>%
+  ggplot(aes(Year,Fatal_Rate))+geom_point()+geom_line()+geom_smooth()+ggtitle("Death Rate since 1900 In USA")
+
+attacks%>%
+  filter(Country=="AUSTRALIA")%>%
+  filter(Year>=1900)%>%
+  group_by(Year)%>%
+  mutate(n=`Fatal (Y/N)`)%>%
+  mutate(t=1)%>%
+  select(c(Year,n,t))%>%
+  na.omit()%>%
+  summarise(death=sum(n),attack=sum(t))%>%
+  filter(2000>=Year,Year>=1900)%>%
+  mutate(Fatal_Rate=death/attack)%>%
+  ggplot(aes(Year,Fatal_Rate))+geom_point()+geom_line()+geom_smooth()+ggtitle("Death Rate since 1900 In Australia")
+```
+##The decrease of death rate since 1950 in both USA and Australia is, quite obvious, I would like to lay the contribution to penicillin.
+##Area compare and computation. It seemed that although the Florida has the most shark attacks, but the death rate has been controled since the 1950s. Combined with the informations mentioned below, I believe it is mostly because of the species of attacks. Although another dangerous shark, bull shark also come there quite oftenly, since it is not the major part of attacks in this area, people who attacked in Florida is likely to survive if nicely treated.
+```{r}
+Death_Rate_Place <- attacks%>%
+  filter(Area%in%Area_information[1:5,]$Area)%>%
+  group_by(Area,Year)%>%
+  mutate(n=1)%>%
+  summarise(death=sum(`Fatal (Y/N)`),time=sum(n))%>%
+  na.omit()%>%
+  filter(Year>=1900)%>%
+  mutate(rate=death/time)
+Death_Rate_Place %>%
+  ggplot(aes(Year, time, colour = Area)) + geom_point() + geom_line() +
+  facet_wrap( ~ Area, nrow = 3) + ggtitle("Number of attacks over years with five top places") +
+  xlab("Year") + ylab("Number of attack") + theme(legend.position = "none")
+Death_Rate_Place%>%
+  ggplot(aes(Year, death, colour = Area)) + geom_point() + geom_line() +
+  facet_wrap( ~ Area, nrow = 3) + ggtitle("Number of death over years with five top places") +
+  xlab("Year") + ylab("Number of death") + theme(legend.position = "none")
+Death_Rate_Place%>%
+  ggplot(aes(Year, rate, colour = Area)) + geom_point() + geom_line() +
+  facet_wrap( ~ Area, nrow = 3) + ggtitle("Death rate over years with five top places") +
+  xlab("Year") + ylab("rate") + theme(legend.position = "none")
+```
+##It seemed that the rate of death in florida was terrifying at the early 20th centurary, but gradually controlled. However, the attacks in California did not seemed to be a big problem before 1950s, but has been quite terrifying during the 1980s. I doubt if that area was greatly developed. For the rest three places, I can't find anything make sense.
+```{r}
+attacks%>%
+  filter(Country%in%top_countries$Country)%>%
+  group_by(Year,Country)%>%
+  mutate(n=1)%>%
+  summarise(attack_of_country=sum(n))%>%
+  left_join(tourism,by=c("Country","Year"))%>%
+  na.omit()%>%
+  mutate(rate=attack_of_country/International_Tourism)%>%
+  ggplot(aes(Year, rate, colour = Country)) + geom_point() + geom_line() +
+  facet_wrap( ~ Country, nrow = 4) + ggtitle("Rate of death over years with tourists") +
+  xlab("Year") + ylab("Number") + theme(legend.position = "none")
+```
+##Compare the species attacked different countries and area. Since some sharks are more dangerous and some not, it is likely for some of them to be more dangerous, which also make countribution of death rate of different area and countries.
+```{r}
+whit_top_countries <- attacks%>%
+  filter(specy=="white")%>%
+  mutate(n=1)%>%
+  group_by(Country,specy)%>%
+  summarise(white_attack=sum(n))%>%
+  arrange(desc(white_attack))%>%
+  na.omit()
+
+whit_top_areas <- attacks%>%
+  filter(specy=="white")%>%
+  mutate(n=1)%>%
+  group_by(Area,specy)%>%
+  summarise(white_attack=sum(n))%>%
+  arrange(desc(white_attack))%>%
+  na.omit()
+data("df_president")
+head(whit_top_areas)
+
+bull_top_areas <- attacks%>%
+  filter(specy=="bull")%>%
+  mutate(n=1)%>%
+  group_by(Area,specy)%>%
+  summarise(white_attack=sum(n))%>%
+  arrange(desc(white_attack))%>%
+  na.omit()
+head(bull_top_areas)
+```
+```{r}
+write.csv(specie_study,"~/specie_fatality.csv")
+write.csv(attacks,"~/attack_new_information.csv")
+write.csv(top_countries,"~/top_countries.csv")
+```
+
+
